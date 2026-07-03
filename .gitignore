@@ -1,0 +1,10 @@
+.vscode
+.claude
+**/.DS_Store
+**/~*
+**/sandbox
+**/.sanitize
+_dev/
+build/install/
+build/host
+
