@@ -105,11 +105,12 @@ func (s *Sanitizer) AllowUnderscore(v bool) *Sanitizer {
 // prep strips the scheme, path, credentials, and port from *url and rectifies it
 // to a bare host or ip in place. When isIP is true the value parsed as an ip and
 // ok reports whether it is a usable public address, so the caller should stop.
-// For hosts ok is false (the caller applies its own host validation) and www
-// reports whether a leading www. label was removed. port is the port number
-// removed, or 0 when none was present; invalid port text (non-numeric, out of
-// range) is still stripped but reports 0.
-func prep(url *string) (isIP, ok, www bool, port int) {
+// For hosts ok is false (the caller applies its own host validation). port is the
+// port number removed, or 0 when none was present; invalid port text (non-numeric,
+// out of range) is still stripped but reports 0. The leading-www label is not
+// touched here — ToHost strips it PSL-aware, after idna, so www.<eTLD> forms (e.g.
+// the "!www.ck" exception) are not reduced to a bare public suffix.
+func prep(url *string) (isIP, ok bool, port int) {
 
 	// basic url assurances
 	if strings.HasPrefix(*url, "//") { // strip protocol-relative prefix //example.com
@@ -146,16 +147,13 @@ func prep(url *string) (isIP, ok, www bool, port int) {
 
 	// detect ipv4/6 and validate
 	if ip, err := netip.ParseAddr(*url); err == nil {
-		return true, !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsPrivate(), false, port
+		return true, !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsPrivate(), port
 	}
 
 	// host form rectification and type assurance
 	*url = strings.ToLower(*url)         // standardize case
-	*url = strings.TrimSuffix(*url, ".") // remove cannonical
-	if www = strings.HasPrefix(*url, "www."); www {
-		*url = (*url)[4:] // strip www label
-	}
-	return false, false, www, port
+	*url = strings.TrimSuffix(*url, ".") // remove trailing dot
+	return false, false, port
 }
 
 // portNumber parses s as a port number, reporting 0 unless s is all digits and
@@ -326,22 +324,34 @@ func (s *Sanitizer) Configure(opt *Options) *Sanitizer {
 //	handles canonical hosts as well as ipv4/6 and idna conversion to punycode
 func (s *Sanitizer) ToHost(url *string) (result Result) {
 
-	result.IP, result.Okay, result.WWW, result.Port = prep(url)
+	result.IP, result.Okay, result.Port = prep(url)
 	if result.IP {
 		return
 	}
 
-	// canonicalize idna labels to the punycode A-label; expose the unicode
-	// display (U-label) form when a conversion actually occurred so the caller
-	// knows to store it alongside the canonical host.
+	// Canonicalize idna labels to the punycode A-label, keeping the unicode display
+	// (U-label) form so it can be exposed when a conversion actually occurred.
 	display := *url
-	if ascii, ok := idna.ToASCII(*url, s.allowUnderscore); ok {
+	ascii, ok := idna.ToASCII(*url, s.allowUnderscore)
+	if !ok {
+		*url = "" // unconvertible idna label; fails validation below
+	}
+
+	// Strip a leading "www." label, PSL-aware: keep it when www is itself the apex
+	// label (the "!www.ck" exception, or www.<eTLD>), so the host is not reduced to a
+	// bare public suffix. Rectify-only mode (no list) always strips. The strip is
+	// applied to both the canonical (A-label) and display (U-label) forms — "www" is
+	// ASCII, so it prefixes both — keeping Display the U-label of the final host.
+	if ok && strings.HasPrefix(ascii, "www.") && (s.tld == nil || !s.wwwIsApexLabel(ascii)) {
+		ascii, display = ascii[4:], display[4:]
+		result.WWW = true
+	}
+
+	if ok {
 		if ascii != display {
 			result.Display = display
 		}
 		*url = ascii
-	} else {
-		*url = "" // unconvertible idna label; fail downstream validation
 	}
 
 	// without a tld map fall back to basic host validation
@@ -435,4 +445,17 @@ func startOfLabelBefore(host string, pos int) int {
 		return d + 1
 	}
 	return 0
+}
+
+// wwwIsApexLabel reports whether the leading "www" of host is the apex (eTLD+1)
+// label itself rather than a subdomain — true only when host is a registrable
+// domain whose first label is www (e.g. "www.ck" under the "!www.ck" exception, or
+// "www.com"). In that case the www must be kept; otherwise it is a subdomain and
+// may be stripped. Callers gate this on a loaded tld list.
+func (s *Sanitizer) wwwIsApexLabel(host string) bool {
+	tld, matched := s.suffix(host)
+	if !matched || tld == 0 { // unknown tld, or host is itself a bare public suffix
+		return false
+	}
+	return startOfLabelBefore(host, tld) == 0
 }

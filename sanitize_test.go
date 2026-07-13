@@ -9,6 +9,37 @@ import (
 	"github.com/netstar-labs/sanitize/internal/idna"
 )
 
+// TestWWWPSLAware pins the PSL-aware leading-www strip: www is removed when it is a
+// subdomain, but kept when it is the apex (eTLD+1) label itself — so exception
+// (!www.ck) and www-under-a-public-suffix forms are no longer reduced to a bare
+// eTLD. Loaded hermetically from the local fixture.
+func TestWWWPSLAware(t *testing.T) {
+	var s sanitize.Sanitizer
+	s.Configure(&sanitize.Options{Source: []string{"testdata/psl_fixture.dat"}})
+	for _, tc := range []struct {
+		in        string
+		host      string
+		www, okay bool
+		apex, tld string
+	}{
+		// www is a subdomain of the registrable domain -> stripped
+		{"www.example.com", "example.com", true, true, "example.com", "com"},
+		{"www.blog.example.com", "blog.example.com", true, true, "example.com", "com"},
+		// www IS the registrable label -> kept (not reduced to a bare public suffix)
+		{"www.ck", "www.ck", false, true, "www.ck", "ck"},                                 // !www.ck exception
+		{"www.example.ck", "www.example.ck", false, true, "www.example.ck", "example.ck"}, // *.ck: example.ck is the eTLD
+		{"www.co.uk", "www.co.uk", false, true, "www.co.uk", "co.uk"},                     // co.uk is the eTLD
+		{"www.com", "www.com", false, true, "www.com", "com"},                             // com is the eTLD
+	} {
+		v := tc.in
+		r := s.ToHost(&v)
+		if v != tc.host || r.WWW != tc.www || r.Okay != tc.okay || v[r.Apex:] != tc.apex || v[r.TLD:] != tc.tld {
+			t.Errorf("%q => host=%q WWW=%v Okay=%v apex=%q tld=%q; want host=%q WWW=%v Okay=%v apex=%q tld=%q",
+				tc.in, v, r.WWW, r.Okay, v[r.Apex:], v[r.TLD:], tc.host, tc.www, tc.okay, tc.apex, tc.tld)
+		}
+	}
+}
+
 // TestPublicSuffixRules exercises the three PSL rule kinds — normal, wildcard, and
 // exception — plus IDN (U-label) rule matching, loaded hermetically from a local
 // fixture (no network). It pins the eTLD (TLD) and apex (eTLD+1) localization that
