@@ -6,7 +6,62 @@ import (
 	"time"
 
 	"github.com/netstar-labs/sanitize"
+	"github.com/netstar-labs/sanitize/internal/idna"
 )
+
+// TestPublicSuffixRules exercises the three PSL rule kinds — normal, wildcard, and
+// exception — plus IDN (U-label) rule matching, loaded hermetically from a local
+// fixture (no network). It pins the eTLD (TLD) and apex (eTLD+1) localization that
+// distinguishes, e.g., "example.ck" (a bare eTLD under the "*.ck" wildcard) from
+// "sub.example.ck" (a registrable apex) and "www.ck" (registrable via the exception).
+func TestPublicSuffixRules(t *testing.T) {
+	var s sanitize.Sanitizer
+	s.Configure(&sanitize.Options{Source: []string{"testdata/psl_fixture.dat"}})
+
+	// Compute the IDN suffix rather than hard-code a punycode magic string.
+	gongsi, ok := idna.ToASCII("公司.cn", false)
+	if !ok {
+		t.Fatal("idna.ToASCII(公司.cn) failed")
+	}
+
+	for _, tc := range []struct {
+		in        string
+		okay      bool
+		apex, tld string
+	}{
+		// normal rules
+		{"example.com", true, "example.com", "com"},
+		{"blog.example.com", true, "example.com", "com"},
+		{"example.co.uk", true, "example.co.uk", "co.uk"},
+		{"deep.blog.example.co.uk", true, "example.co.uk", "co.uk"},
+		{"co.uk", false, "co.uk", "co.uk"}, // bare public suffix, not a host
+
+		// wildcard "*.ck": example.ck is an eTLD; the apex is one label deeper
+		{"example.ck", false, "example.ck", "example.ck"},
+		{"sub.example.ck", true, "sub.example.ck", "example.ck"},
+		{"a.sub.example.ck", true, "sub.example.ck", "example.ck"},
+
+		// wildcard + exception under kawasaki.jp. (The "!www.ck" exception is exercised
+		// in the internal suffix() test — through ToHost it is unreachable because the
+		// "www." label is stripped during rectification before tld detection.)
+		{"foo.kawasaki.jp", false, "foo.kawasaki.jp", "foo.kawasaki.jp"}, // bare eTLD
+		{"shop.foo.kawasaki.jp", true, "shop.foo.kawasaki.jp", "foo.kawasaki.jp"},
+		{"city.kawasaki.jp", true, "city.kawasaki.jp", "kawasaki.jp"}, // exception -> registrable
+
+		// IDN rule (公司.cn) must match the A-label host ToHost produces
+		{"shop.公司.cn", true, "shop." + gongsi, gongsi},
+
+		// unknown tld is still rejected (no implicit "*" default rule)
+		{"foo.nonexistenttld", false, "nonexistenttld", "foo.nonexistenttld"},
+	} {
+		v := tc.in
+		r := s.ToHost(&v)
+		if r.Okay != tc.okay || v[r.Apex:] != tc.apex || v[r.TLD:] != tc.tld {
+			t.Errorf("%q => host=%q %+v apex=%q tld=%q; want Okay=%v apex=%q tld=%q",
+				tc.in, v, r, v[r.Apex:], v[r.TLD:], tc.okay, tc.apex, tc.tld)
+		}
+	}
+}
 
 func TestSanitize(t *testing.T) {
 

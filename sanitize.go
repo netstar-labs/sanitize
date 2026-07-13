@@ -19,8 +19,22 @@ import (
 // its own it performs rectification and basic format validation only; once one
 // or more tld lists are loaded via Configure it additionally reports the tld and
 // apex (eTLD+1) index locations and rejects hosts with an unrecognized tld.
+//
+// The Public Suffix List distinguishes three rule kinds (publicsuffix.org
+// algorithm), all honoured here so the public suffix — and therefore the apex
+// (eTLD+1) — is identified correctly:
+//
+//   - normal ("com", "co.uk"): the suffix itself is a public suffix. Held in tld.
+//   - wildcard ("*.ck"): every single label under the parent is a public suffix,
+//     so "example.ck" is an eTLD and "sub.example.ck" is the apex. The parent
+//     ("ck") is held in wildcard.
+//   - exception ("!www.ck"): carves a name back out of a wildcard, so "www.ck" is
+//     the apex (its eTLD is "ck"). The carved name ("www.ck") is held in except and
+//     wins over any wildcard.
 type Sanitizer struct {
-	tld             map[string]struct{}
+	tld             map[string]struct{} // normal exact suffixes (IANA tlds + PSL normal rules)
+	wildcard        map[string]struct{} // PSL "*.X" parents: any single label under X is a public suffix
+	except          map[string]struct{} // PSL "!X" carve-outs: X is the apex, its eTLD is X minus its first label
 	allowUnderscore bool
 }
 
@@ -73,8 +87,9 @@ func NewTLDSanitizer() *Sanitizer {
 	return NewSanitizer().Configure(&Options{Iana: true, PublicSuffix: true})
 }
 
-// Len is the number of registered tld items loaded (0 in rectify-only mode).
-func (s *Sanitizer) Len() int { return len(s.tld) }
+// Len is the number of registered rules loaded across all three PSL rule kinds
+// (normal, wildcard, exception); 0 in rectify-only mode.
+func (s *Sanitizer) Len() int { return len(s.tld) + len(s.wildcard) + len(s.except) }
 
 // AllowUnderscore relaxes STD3 ASCII rules so underscore labels (e.g. _dmarc,
 // _sip._tcp, _acme-challenge) validate instead of being rejected as malformed.
@@ -153,6 +168,30 @@ func portNumber(s string) int {
 	return int(n)
 }
 
+// isASCII reports whether s is pure 7-bit ASCII (no idna conversion needed).
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// canonRule normalizes a PSL rule label (after any !/*. prefix has been stripped)
+// to the canonical A-label form the host is matched in: ASCII rules are simply
+// lowercased; U-label rules (e.g. "公司.cn") are converted to punycode so they match
+// the A-label host ToHost produces. An unconvertible rule yields "" and is dropped.
+func (s *Sanitizer) canonRule(row string) string {
+	if isASCII(row) {
+		return strings.ToLower(row)
+	}
+	if a, ok := idna.ToASCII(row, s.allowUnderscore); ok {
+		return a
+	}
+	return ""
+}
+
 // fetch downloads url to target atomically via a temp file and rename; a partial
 // or failed transfer leaves any existing target untouched. Errors are swallowed
 // by design so a missing remote list degrades to whatever local cache exists.
@@ -217,6 +256,8 @@ func (s *Sanitizer) Configure(opt *Options) *Sanitizer {
 		// tld are derived from iana.org and publicsuffix.org lists that are used to
 		// detect and validate the host tld and for apex localization; 72h updates
 		s.tld = make(map[string]struct{})
+		s.wildcard = make(map[string]struct{})
+		s.except = make(map[string]struct{})
 
 		var resource = ".sanitize"
 		if runtime.GOOS == "linux" {
@@ -241,13 +282,24 @@ func (s *Sanitizer) Configure(opt *Options) *Sanitizer {
 			}
 			var scanner = bufio.NewScanner(f)
 			for scanner.Scan() {
-				row := strings.ToLower(strings.TrimSpace(scanner.Text()))
+				row := strings.TrimSpace(scanner.Text())
 				if len(row) == 0 || strings.HasPrefix(row, "//") || strings.HasPrefix(row, "#") {
 					continue
 				}
-				row = strings.TrimPrefix(row, "*.") // ignore psl *. rules for simplicity
-				if len(row) > 0 {
-					s.tld[row] = struct{}{}
+				// Categorize by PSL rule kind, then normalize the remaining label(s)
+				// to the A-label (punycode) form so IDN rules match the A-label host
+				// ToHost produces. The map keyed for each kind reflects its semantics
+				// (see the Sanitizer doc): wildcard stores the parent, exception the
+				// carved-out name, everything else the exact suffix.
+				dst := s.tld
+				switch {
+				case row[0] == '!':
+					row, dst = row[1:], s.except
+				case strings.HasPrefix(row, "*."):
+					row, dst = row[2:], s.wildcard
+				}
+				if row = s.canonRule(row); row != "" {
+					dst[row] = struct{}{}
 				}
 			}
 			f.Close()
@@ -298,25 +350,89 @@ func (s *Sanitizer) ToHost(url *string) (result Result) {
 		return
 	}
 
-	// detect tld and set the apex index
-	idx := 0
-	for {
-		if _, ok := s.tld[(*url)[idx:]]; ok {
-			result.TLD = idx
-			if idx == result.Apex {
-				return // item is a bare tld; not a usable host
+	// detect the public suffix (eTLD) per the PSL algorithm, then localize the apex.
+	tld, matched := s.suffix(*url)
+	if !matched {
+		// unrecognized tld: reject, but still point apex at the rightmost label so the
+		// caller can inspect the offending suffix (TLD stays 0 => host[TLD:] is the host).
+		result.Apex = startOfLastLabel(*url)
+		return
+	}
+	result.TLD = tld
+	if tld == 0 {
+		return // the whole host is a public suffix (bare tld); not a usable host
+	}
+	// apex (eTLD+1) is the public suffix plus the label immediately to its left
+	result.Apex = startOfLabelBefore(*url, tld)
+	result.Okay = len(*url) < 254
+	return
+}
+
+// suffix locates the public suffix (eTLD) of host per the publicsuffix.org
+// algorithm over the loaded rule sets, returning the byte index where it begins
+// and whether any rule matched. Exception rules win outright; otherwise the
+// longest matching normal or wildcard rule prevails. matched is false for an
+// unrecognized tld (this validator deliberately does not apply the implicit "*"
+// default, so an unknown suffix is rejected rather than treated as a tld).
+func (s *Sanitizer) suffix(host string) (tld int, matched bool) {
+
+	// Exception rules (!name) take priority. Walk suffixes longest -> shortest; the
+	// first (longest) exact hit wins, and the public suffix is the rule minus its
+	// leftmost label (so "!www.ck" makes "www.ck" the apex and "ck" its eTLD).
+	if len(s.except) > 0 {
+		for idx := 0; ; {
+			cand := host[idx:]
+			if _, ok := s.except[cand]; ok {
+				if d := strings.IndexByte(cand, '.'); d >= 0 {
+					return idx + d + 1, true
+				}
+				return idx, true
 			}
-			break // tld found
+			next := strings.IndexByte(cand, '.')
+			if next < 0 {
+				break
+			}
+			idx += next + 1
 		}
-		result.Apex = idx
-		next := strings.IndexByte((*url)[idx:], '.')
+	}
+
+	// Longest matching normal or wildcard rule. Walking longest -> shortest, the
+	// first hit is the longest: a normal rule makes the candidate itself the public
+	// suffix; a wildcard makes the candidate (its parent-minus-one-label being a
+	// wildcard base) the public suffix.
+	for idx := 0; ; {
+		cand := host[idx:]
+		if _, ok := s.tld[cand]; ok {
+			return idx, true
+		}
+		if d := strings.IndexByte(cand, '.'); d >= 0 {
+			if _, ok := s.wildcard[cand[d+1:]]; ok {
+				return idx, true
+			}
+		}
+		next := strings.IndexByte(cand, '.')
 		if next < 0 {
-			break // exhausted, no registered tld found
+			break
 		}
 		idx += next + 1
 	}
+	return 0, false
+}
 
-	// a registered tld sits past the first label (TLD > 0); anything else is invalid
-	result.Okay = result.TLD > 0 && len(*url) < 254
-	return
+// startOfLastLabel returns the byte index of host's rightmost label.
+func startOfLastLabel(host string) int {
+	if d := strings.LastIndexByte(host, '.'); d >= 0 {
+		return d + 1
+	}
+	return 0
+}
+
+// startOfLabelBefore returns the byte index of the label immediately to the left
+// of the label starting at pos (pos > 0), i.e. the apex label given the public
+// suffix start.
+func startOfLabelBefore(host string, pos int) int {
+	if d := strings.LastIndexByte(host[:pos-1], '.'); d >= 0 {
+		return d + 1
+	}
+	return 0
 }

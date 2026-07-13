@@ -1,0 +1,24 @@
+// sanitize test fixture — representative Public Suffix List rule kinds.
+// Mirrors the real PSL's shapes so the wildcard/exception/IDN handling can be
+// tested hermetically (no network). "ck" simulates the IANA single-tld entry
+// combined with the PSL "*.ck" / "!www.ck" rules.
+
+// normal rules (the suffix itself is a public suffix)
+com
+net
+uk
+co.uk
+jp
+cn
+ck
+
+// wildcard rules (any single label under the parent is a public suffix)
+*.ck
+*.kawasaki.jp
+
+// exception rules (carve a name back out of a wildcard)
+!www.ck
+!city.kawasaki.jp
+
+// IDN rule in U-label form (must match the A-label host)
+公司.cn
