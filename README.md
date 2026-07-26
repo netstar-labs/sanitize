@@ -74,3 +74,7 @@ Supporting directories: [`cmd/`](cmd) (stdin/stdout filter), [`build/`](build)
 (owned idna policy seam), and [`internal/x`](internal/x) (vendored
 `x/net/idna` + `x/text`, pinned to Unicode 15). Runtime TLD lists cache under
 `./.sanitize` (or `/var/sanitize` on Linux).
+
+## License
+
+Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE).
