@@ -54,10 +54,18 @@ type Result struct {
 // Options selects which tld lists Configure loads. The boolean flags pull the
 // standard iana.org and publicsuffix.org lists; Source adds arbitrary local
 // paths or remote (http/https) lists.
+//
+// The publicsuffix.org list has two sections: the ICANN suffixes and, below the
+// "===BEGIN PRIVATE DOMAINS===" marker, privately-operated suffixes (blogspot.com,
+// github.io, s3.amazonaws.com, …). Both load by default, so PublicSuffix mode
+// reports foo.blogspot.com's apex as foo.blogspot.com while Iana-only mode reports
+// blogspot.com — a deliberate difference. Set ICANNDomainsOnly to stop at the
+// marker and treat only ICANN suffixes as public.
 type Options struct {
-	Iana         bool
-	PublicSuffix bool
-	Source       []string
+	Iana             bool
+	PublicSuffix     bool
+	ICANNDomainsOnly bool // stop PSL parsing at the private-domains section
+	Source           []string
 }
 
 const (
@@ -118,6 +126,14 @@ func (s *Sanitizer) AllowUnderscore(v bool) *Sanitizer {
 // the "!www.ck" exception) are not reduced to a bare public suffix.
 func prep(url *string) (isIP, ok bool, port int) {
 
+	// WHATWG input cleaning: strip any tab/LF/CR, trim leading/trailing C0 controls
+	// and space, and (for the special schemes this tool targets) treat backslash as
+	// a slash. A valid host contains none of these, so this is safe and closes the
+	// "http://evil.com\@good.com/" authority-confusion bypass (backslash ends the
+	// authority, so the host is evil.com, not good.com).
+	*url = stripURLWhitespace(*url)
+	*url = strings.ReplaceAll(*url, "\\", "/")
+
 	// basic url assurances
 	if strings.HasPrefix(*url, "//") { // strip protocol-relative prefix //example.com
 		*url = (*url)[2:]
@@ -129,11 +145,14 @@ func prep(url *string) (isIP, ok bool, port int) {
 	if idx := strings.IndexByte(*url, '/'); idx >= 0 {
 		*url = (*url)[:idx] // strip page
 	}
-	if idx := strings.IndexByte(*url, '@'); idx >= 0 {
-		*url = (*url)[idx+1:] // strip user:pass
+	if idx := strings.LastIndexByte(*url, '@'); idx >= 0 {
+		*url = (*url)[idx+1:] // strip user:pass — userinfo ends at the LAST '@' (WHATWG)
 	}
 
-	// port removal / ipv6 bracket unwrap
+	// port removal / ipv6 bracket unwrap. Invalid port text (non-numeric, out of
+	// range) is deliberately stripped and reported as 0 rather than rejecting the
+	// host — a rectifier still yields the host from a URL with a junk port (a
+	// documented, tested choice; see prep's doc and TestPort).
 	if ci := strings.IndexByte(*url, ':'); ci >= 0 { // ported host|ipv4 or ipv6
 		switch {
 		case strings.HasPrefix(*url, "["):
@@ -153,12 +172,20 @@ func prep(url *string) (isIP, ok bool, port int) {
 
 	// detect ipv4/6 and validate
 	if ip, err := netip.ParseAddr(*url); err == nil {
-		return true, !ip.IsUnspecified() && !ip.IsLoopback() && !ip.IsPrivate(), port
+		return true, isPublicIP(ip), port
 	}
 
 	// host form rectification and type assurance
-	*url = strings.ToLower(*url)         // standardize case
-	*url = strings.TrimSuffix(*url, ".") // remove trailing dot
+	*url = strings.ToLower(*url)        // standardize case
+	*url = strings.TrimRight(*url, ".") // remove ALL trailing dots (root labels)
+	if d, dok := percentDecodeHost(*url); dok {
+		*url = d // decode %XX host bytes (browser decodes the host before IDNA)
+	} else {
+		*url = "" // decoded to a forbidden host code point / malformed escape -> reject
+	}
+	if hasEmptyLabel(*url) {
+		*url = "" // empty label (".x", "x..y") is not a valid host
+	}
 	return false, false, port
 }
 
@@ -170,6 +197,104 @@ func portNumber(s string) int {
 		return 0
 	}
 	return int(n)
+}
+
+// stripURLWhitespace removes every tab/LF/CR (WHATWG strips these anywhere in a
+// URL) and trims leading/trailing C0 controls and space.
+func stripURLWhitespace(s string) string {
+	if strings.ContainsAny(s, "\t\n\r") {
+		s = strings.Map(func(r rune) rune {
+			if r == '\t' || r == '\n' || r == '\r' {
+				return -1
+			}
+			return r
+		}, s)
+	}
+	return strings.TrimFunc(s, func(r rune) bool { return r <= ' ' })
+}
+
+// isPublicIP reports whether ip is a usable, publicly-routable unicast address.
+// It excludes unspecified, loopback, private (RFC1918 / ULA), link-local unicast
+// and multicast (incl. cloud-metadata 169.254.0.0/16 and fe80::/10), all
+// multicast, CGNAT (100.64.0.0/10), and the v4 broadcast address — so a threat
+// tool never classifies e.g. 169.254.169.254 or 224.0.0.1 as a public host.
+func isPublicIP(ip netip.Addr) bool {
+	if ip.Is4In6() {
+		ip = ip.Unmap() // judge ::ffff:a.b.c.d by its v4 identity
+	}
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
+		return false
+	}
+	if ip.Is4() {
+		b := ip.As4()
+		if b[0] == 100 && b[1] >= 64 && b[1] <= 127 { // CGNAT 100.64.0.0/10
+			return false
+		}
+		if b == [4]byte{255, 255, 255, 255} { // limited broadcast
+			return false
+		}
+	}
+	return true
+}
+
+// hasEmptyLabel reports whether host has a zero-length DNS label — an empty host,
+// a leading dot, or an interior "..". (A trailing dot is trimmed before this.)
+// UTS-46 lookup mapping does not reject these, so guard them here.
+func hasEmptyLabel(host string) bool {
+	return host == "" || host[0] == '.' || strings.Contains(host, "..")
+}
+
+// forbiddenHostByte reports whether b is a WHATWG forbidden host code point — a
+// control, space, or an authority/URL delimiter. A percent-escape that decodes to
+// one of these would smuggle a different host past extraction, so it is rejected.
+func forbiddenHostByte(b byte) bool {
+	return b <= 0x20 || b == 0x7f || strings.IndexByte("\"#%/:<>?@[\\]^|", b) >= 0
+}
+
+// percentDecodeHost decodes %XX escapes in host. ok is false for a malformed
+// escape or one that decodes to a forbidden host byte; a host with no '%' is
+// returned unchanged.
+func percentDecodeHost(host string) (string, bool) {
+	if !strings.ContainsRune(host, '%') {
+		return host, true
+	}
+	var b strings.Builder
+	b.Grow(len(host))
+	for i := 0; i < len(host); i++ {
+		if host[i] != '%' {
+			b.WriteByte(host[i])
+			continue
+		}
+		if i+2 >= len(host) {
+			return "", false // dangling '%'
+		}
+		hi, lo := unhex(host[i+1]), unhex(host[i+2])
+		if hi < 0 || lo < 0 {
+			return "", false // malformed %XX
+		}
+		d := byte(hi<<4 | lo)
+		if forbiddenHostByte(d) {
+			return "", false // encoded delimiter/control -> reject
+		}
+		b.WriteByte(d)
+		i += 2
+	}
+	return b.String(), true
+}
+
+// unhex returns the value of a hex digit, or -1.
+func unhex(c byte) int {
+	switch {
+	case '0' <= c && c <= '9':
+		return int(c - '0')
+	case 'a' <= c && c <= 'f':
+		return int(c-'a') + 10
+	case 'A' <= c && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
 }
 
 // isASCII reports whether s is pure 7-bit ASCII (no idna conversion needed).
@@ -287,6 +412,9 @@ func (s *Sanitizer) Configure(opt *Options) *Sanitizer {
 			var scanner = bufio.NewScanner(f)
 			for scanner.Scan() {
 				row := strings.TrimSpace(scanner.Text())
+				if opt.ICANNDomainsOnly && strings.Contains(row, "===BEGIN PRIVATE DOMAINS===") {
+					break // ICANN-only: stop before the PSL private-domains section
+				}
 				if len(row) == 0 || strings.HasPrefix(row, "//") || strings.HasPrefix(row, "#") {
 					continue
 				}

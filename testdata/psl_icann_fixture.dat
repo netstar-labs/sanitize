@@ -1,0 +1,13 @@
+// sanitize test fixture — ICANN vs PRIVATE PSL sections, for ICANNDomainsOnly.
+// Mirrors the real PSL layout: ICANN suffixes first, then a private-domains
+// section below the marker line (blogspot.com et al. are privately operated).
+
+// ICANN section
+com
+net
+co.uk
+uk
+
+// ===BEGIN PRIVATE DOMAINS===
+blogspot.com
+github.io
