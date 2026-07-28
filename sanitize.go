@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/netstar-labs/sanitize/internal/idna"
+	"github.com/netstar-labs/idna"
 )
 
 // Sanitizer rectifies a raw url to its host form and validates the result. On
@@ -64,6 +64,12 @@ const (
 	ianaSource = "https://data.iana.org/TLD/tlds-alpha-by-domain.txt"
 	pslSource  = "https://publicsuffix.org/list/public_suffix_list.dat"
 )
+
+// IDNAVersion reports the Unicode version the UTS-46 host mapping is pinned to
+// (via the shared idna module). An A-label is a lookup key, so a re-vendor can
+// change it — stamp this onto every stored/hashed host so a later pin bump is
+// detectable as skew rather than a silent miss.
+func IDNAVersion() string { return idna.Unicode() }
 
 // NewSanitizer returns a rectify-only Sanitizer (no tld detection); call
 // Configure to load tld lists for full control, or use NewIANASanitizer /
