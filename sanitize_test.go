@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/netstar-labs/idna"
 	"github.com/netstar-labs/sanitize"
-	"github.com/netstar-labs/sanitize/internal/idna"
 )
 
 // TestWWWPSLAware pins the PSL-aware leading-www strip: www is removed when it is a
