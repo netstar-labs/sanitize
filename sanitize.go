@@ -202,21 +202,22 @@ func portNumber(s string) int {
 // stripURLWhitespace removes every tab/LF/CR (WHATWG strips these anywhere in a
 // URL) and trims leading/trailing C0 controls and space.
 func stripURLWhitespace(s string) string {
-	if strings.ContainsAny(s, "\t\n\r") {
-		s = strings.Map(func(r rune) rune {
-			if r == '\t' || r == '\n' || r == '\r' {
-				return -1
-			}
-			return r
-		}, s)
-	}
+	s = strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, s)
 	return strings.TrimFunc(s, func(r rune) bool { return r <= ' ' })
 }
 
 // isPublicIP reports whether ip is a usable, publicly-routable unicast address.
 // It excludes unspecified, loopback, private (RFC1918 / ULA), link-local unicast
 // and multicast (incl. cloud-metadata 169.254.0.0/16 and fe80::/10), all
-// multicast, CGNAT (100.64.0.0/10), and the v4 broadcast address — so a threat
+// multicast, CGNAT (100.64.0.0/10), the remaining IANA special-purpose v4
+// ranges (documentation TEST-NET-1/2/3, benchmarking 198.18.0.0/15, the
+// deprecated 6to4 relay anycast 192.88.99.0/24), and reserved Class E
+// (240.0.0.0/4, which also covers the v4 broadcast address) — so a threat
 // tool never classifies e.g. 169.254.169.254 or 224.0.0.1 as a public host.
 func isPublicIP(ip netip.Addr) bool {
 	if ip.Is4In6() {
@@ -317,11 +318,11 @@ func percentDecodeHost(host string) (string, bool) {
 		if i+2 >= len(host) {
 			return "", false // dangling '%'
 		}
-		hi, lo := unhex(host[i+1]), unhex(host[i+2])
-		if hi < 0 || lo < 0 {
+		n, err := strconv.ParseUint(host[i+1:i+3], 16, 8)
+		if err != nil {
 			return "", false // malformed %XX
 		}
-		d := byte(hi<<4 | lo)
+		d := byte(n)
 		if forbiddenHostByte(d) {
 			return "", false // encoded delimiter/control -> reject
 		}
@@ -329,19 +330,6 @@ func percentDecodeHost(host string) (string, bool) {
 		i += 2
 	}
 	return b.String(), true
-}
-
-// unhex returns the value of a hex digit, or -1.
-func unhex(c byte) int {
-	switch {
-	case '0' <= c && c <= '9':
-		return int(c - '0')
-	case 'a' <= c && c <= 'f':
-		return int(c-'a') + 10
-	case 'A' <= c && c <= 'F':
-		return int(c-'A') + 10
-	}
-	return -1
 }
 
 // isASCII reports whether s is pure 7-bit ASCII (no idna conversion needed).
@@ -530,12 +518,11 @@ func (s *Sanitizer) ToHost(url *string) (result Result) {
 	// bare public suffix. Rectify-only mode (no list) always strips. The strip is
 	// applied to both the canonical (A-label) and display (U-label) forms — "www" is
 	// ASCII, so it prefixes both — keeping Display the U-label of the final host.
-	if ok && strings.HasPrefix(ascii, "www.") && (s.tld == nil || !s.wwwIsApexLabel(ascii)) {
-		ascii, display = ascii[4:], display[4:]
-		result.WWW = true
-	}
-
 	if ok {
+		if strings.HasPrefix(ascii, "www.") && (s.tld == nil || !s.wwwIsApexLabel(ascii)) {
+			ascii, display = ascii[4:], display[4:]
+			result.WWW = true
+		}
 		if ascii != display {
 			result.Display = display
 		}
@@ -586,11 +573,10 @@ func (s *Sanitizer) suffix(host string) (tld int, matched bool) {
 				}
 				return idx, true
 			}
-			next := strings.IndexByte(cand, '.')
-			if next < 0 {
+			var ok bool
+			if idx, ok = advanceLabel(cand, idx); !ok {
 				break
 			}
-			idx += next + 1
 		}
 	}
 
@@ -608,21 +594,31 @@ func (s *Sanitizer) suffix(host string) (tld int, matched bool) {
 				return idx, true
 			}
 		}
-		next := strings.IndexByte(cand, '.')
-		if next < 0 {
+		var ok bool
+		if idx, ok = advanceLabel(cand, idx); !ok {
 			break
 		}
-		idx += next + 1
 	}
 	return 0, false
 }
 
+// advanceLabel returns the absolute index (from idx) of the next label to the
+// right within cand (== host[idx:]), and false when cand is host's last label
+// (nothing left to advance to). Shared "walk suffix candidates longest-to-
+// shortest" stepping logic for suffix's two rule-precedence loops above; it
+// carries none of their match semantics (exception-wins-outright vs.
+// longest-normal-or-wildcard-wins), which stay independent in each loop.
+func advanceLabel(cand string, idx int) (int, bool) {
+	next := strings.IndexByte(cand, '.')
+	if next < 0 {
+		return idx, false
+	}
+	return idx + next + 1, true
+}
+
 // startOfLastLabel returns the byte index of host's rightmost label.
 func startOfLastLabel(host string) int {
-	if d := strings.LastIndexByte(host, '.'); d >= 0 {
-		return d + 1
-	}
-	return 0
+	return startOfLabelBefore(host, len(host)+1)
 }
 
 // startOfLabelBefore returns the byte index of the label immediately to the left
