@@ -232,7 +232,22 @@ func isPublicIP(ip netip.Addr) bool {
 		if b[0] == 100 && b[1] >= 64 && b[1] <= 127 { // CGNAT 100.64.0.0/10
 			return false
 		}
-		if b == [4]byte{255, 255, 255, 255} { // limited broadcast
+		if b[0] == 192 && b[1] == 0 && b[2] == 2 { // TEST-NET-1 192.0.2.0/24
+			return false
+		}
+		if b[0] == 198 && b[1] == 51 && b[2] == 100 { // TEST-NET-2 198.51.100.0/24
+			return false
+		}
+		if b[0] == 203 && b[1] == 0 && b[2] == 113 { // TEST-NET-3 203.0.113.0/24
+			return false
+		}
+		if b[0] == 198 && b[1]&0xfe == 18 { // benchmarking 198.18.0.0/15
+			return false
+		}
+		if b[0] == 192 && b[1] == 88 && b[2] == 99 { // deprecated 6to4 relay anycast 192.88.99.0/24
+			return false
+		}
+		if b[0] >= 240 { // reserved (Class E) 240.0.0.0/4, incl. the limited broadcast 255.255.255.255
 			return false
 		}
 	}
@@ -265,6 +280,20 @@ func forbiddenHostByte(b byte) bool {
 func hasForbiddenHostByte(host string) bool {
 	for i := 0; i < len(host); i++ {
 		if forbiddenHostByte(host[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOverlongLabel reports whether any dot-delimited label in host exceeds the
+// RFC 1035 63-octet limit. Neither idna profile enforces this (by design, on
+// idna's side — see its own doc comment); sanitize adds it here since a
+// syntactically-invalid name would otherwise still report Okay=true and feed a
+// registrable-domain (apex/TLD) computation as if it were a real one.
+func hasOverlongLabel(host string) bool {
+	for _, label := range strings.Split(host, ".") {
+		if len(label) > 63 {
 			return true
 		}
 	}
@@ -515,7 +544,7 @@ func (s *Sanitizer) ToHost(url *string) (result Result) {
 
 	// without a tld map fall back to basic host validation
 	if s.tld == nil {
-		result.Okay = strings.Contains(*url, ".") && len(*url) < 254
+		result.Okay = strings.Contains(*url, ".") && len(*url) < 254 && !hasOverlongLabel(*url)
 		return
 	}
 
@@ -533,7 +562,7 @@ func (s *Sanitizer) ToHost(url *string) (result Result) {
 	}
 	// apex (eTLD+1) is the public suffix plus the label immediately to its left
 	result.Apex = startOfLabelBefore(*url, tld)
-	result.Okay = len(*url) < 254
+	result.Okay = len(*url) < 254 && !hasOverlongLabel(*url)
 	return
 }
 

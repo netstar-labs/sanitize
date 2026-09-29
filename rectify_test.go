@@ -1,6 +1,7 @@
 package sanitize_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/netstar-labs/sanitize"
@@ -83,9 +84,26 @@ func TestRectifyPostIDNAMappingEdgeCases(t *testing.T) {
 	}
 }
 
-// TestIPClassificationSpecials is the regression suite for finding F3: a threat
-// tool must not classify link-local (cloud metadata), multicast, broadcast, CGNAT,
-// or 4-in-6-wrapped specials as usable public hosts.
+// TestRectifyOverlongLabel is the regression suite for finding F10 (A1 audit):
+// neither idna profile enforces the RFC 1035 63-octet per-label limit, so a
+// syntactically-invalid name would otherwise still report Okay=true.
+func TestRectifyOverlongLabel(t *testing.T) {
+	overlong := strings.Repeat("a", 64) + ".com"
+	if host, okay, _ := rectify("http://" + overlong + "/"); okay {
+		t.Errorf("F10: ToHost(64-byte label) = host=%q okay=true, want okay=false", host)
+	}
+	// boundary: exactly 63 bytes must still pass.
+	boundary := strings.Repeat("a", 63) + ".com"
+	if host, okay, _ := rectify("http://" + boundary + "/"); !okay || host != boundary {
+		t.Errorf("F10 boundary: ToHost(63-byte label) = host=%q okay=%v, want host=%q okay=true", host, okay, boundary)
+	}
+}
+
+// TestIPClassificationSpecials is the regression suite for finding F3 (link-
+// local/multicast/broadcast/CGNAT/4-in-6) and F11 (A1 audit: the remaining
+// IANA special-purpose ranges — documentation, benchmarking, deprecated 6to4
+// relay anycast, and reserved Class E): a threat tool must not classify any of
+// these as usable public hosts.
 func TestIPClassificationSpecials(t *testing.T) {
 	for _, tc := range []struct {
 		in     string
@@ -98,6 +116,12 @@ func TestIPClassificationSpecials(t *testing.T) {
 		{"http://[::ffff:169.254.169.254]/", false}, // 4-in-6 link-local
 		{"http://100.64.0.1/", false},               // CGNAT 100.64/10
 		{"http://10.0.0.1/", false},                 // RFC1918 (already caught)
+		{"http://192.0.2.1/", false},                // F11: TEST-NET-1
+		{"http://198.51.100.1/", false},             // F11: TEST-NET-2
+		{"http://203.0.113.1/", false},              // F11: TEST-NET-3
+		{"http://198.18.0.1/", false},               // F11: benchmarking 198.18.0.0/15
+		{"http://192.88.99.1/", false},              // F11: deprecated 6to4 relay anycast
+		{"http://240.0.0.1/", false},                // F11: reserved (Class E)
 		{"http://8.8.8.8/", true},                   // genuinely public
 	} {
 		_, okay, isIP := rectify(tc.in)
