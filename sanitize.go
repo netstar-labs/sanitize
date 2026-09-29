@@ -253,6 +253,24 @@ func forbiddenHostByte(b byte) bool {
 	return b <= 0x20 || b == 0x7f || strings.IndexByte("\"#%/:<>?@[\\]^|", b) >= 0
 }
 
+// hasForbiddenHostByte reports whether host contains any WHATWG forbidden host
+// code point. Used to re-check idna.ToASCII's OUTPUT (guaranteed pure ASCII), not
+// just prep's raw input: UTS-46 mapping folds "fullwidth"/"halfwidth" Unicode
+// punctuation (U+FF00-FFEF, e.g. '＠'->'@', '／'->'/', '：'->':', '＼'->'\') down to
+// its literal ASCII form, so a delimiter that isn't present pre-mapping can appear
+// post-mapping. The WHATWG URL spec's own "domain parser" re-checks ToASCII's
+// output against this exact forbidden-byte set for exactly this reason (verified
+// against the spec text); sanitize must too, or a folded delimiter sails through
+// as part of a string reported Okay=true.
+func hasForbiddenHostByte(host string) bool {
+	for i := 0; i < len(host); i++ {
+		if forbiddenHostByte(host[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 // percentDecodeHost decodes %XX escapes in host. ok is false for a malformed
 // escape or one that decodes to a forbidden host byte; a host with no '%' is
 // returned unchanged.
@@ -467,6 +485,13 @@ func (s *Sanitizer) ToHost(url *string) (result Result) {
 	// (U-label) form so it can be exposed when a conversion actually occurred.
 	display := *url
 	ascii, ok := idna.ToASCII(*url, s.allowUnderscore)
+	if ok && (hasEmptyLabel(ascii) || hasForbiddenHostByte(ascii)) {
+		// idna's UTS-46 mapping can fold Unicode punctuation to a literal ASCII
+		// delimiter or produce an empty label; re-check its OUTPUT the same way
+		// prep already checked the raw input, so a folded "." or "@"/"/" can't
+		// sail through disguised as a validated host.
+		ok = false
+	}
 	if !ok {
 		*url = "" // unconvertible idna label; fails validation below
 	}

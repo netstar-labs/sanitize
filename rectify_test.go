@@ -52,6 +52,37 @@ func TestRectifyEdgeCases(t *testing.T) {
 	}
 }
 
+// TestRectifyPostIDNAMappingEdgeCases is the regression suite for finding F9 (A1
+// audit): idna's UTS-46 mapping folds "fullwidth" Unicode punctuation (U+FF00-
+// FFEF, e.g. '．'->'.', '＠'->'@', '／'->'/') to its literal ASCII form AFTER
+// prep's own delimiter/empty-label checks have already run — so a fullwidth
+// delimiter sails through pre-mapping validation clean and then decodes into a
+// real delimiter/empty label inside a host reported Okay=true. This is a
+// regression of the F2 fix (06eeb92), which closed the identical hole for
+// literal and percent-encoded input but not for Unicode mapping.
+func TestRectifyPostIDNAMappingEdgeCases(t *testing.T) {
+	// F9a — fullwidth dot; default (strict) profile, no special config needed.
+	if host, okay, _ := rectify("a．．b.com"); okay {
+		t.Errorf("F9a: ToHost(fullwidth dots) = host=%q okay=true, want okay=false (empty label smuggled through)", host)
+	}
+
+	// F9b/c — fullwidth '@'/'/' ; require AllowUnderscore(true) (the loose
+	// profile), a documented, realistic config for _dmarc/_sip._tcp-style
+	// DNS-record consumers.
+	loose := sanitize.NewSanitizer().AllowUnderscore(true)
+	rectifyLoose := func(raw string) (string, bool) {
+		h := raw
+		r := loose.ToHost(&h)
+		return h, r.Okay
+	}
+	if host, okay := rectifyLoose("good.com＠evil.com"); okay {
+		t.Errorf("F9b: ToHost(fullwidth @, loose) = host=%q okay=true, want okay=false (delimiter smuggled through)", host)
+	}
+	if host, okay := rectifyLoose("evil.com／path.example.com"); okay {
+		t.Errorf("F9c: ToHost(fullwidth /, loose) = host=%q okay=true, want okay=false (delimiter smuggled through)", host)
+	}
+}
+
 // TestIPClassificationSpecials is the regression suite for finding F3: a threat
 // tool must not classify link-local (cloud metadata), multicast, broadcast, CGNAT,
 // or 4-in-6-wrapped specials as usable public hosts.
