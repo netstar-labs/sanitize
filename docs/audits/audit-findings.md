@@ -24,7 +24,7 @@ was re-verified by a second independent skeptic before merge.
 
 | # | Severity | Finding | Commit |
 |---|---|---|---|
-| 1 | **critical** | `ToASCII`/`ToASCIIErr`/`ToUnicode` didn't re-validate idna's output for delimiters/empty labels — Unicode fullwidth punctuation (e.g. '．','＠','／') folds to a literal ASCII delimiter post-mapping, smuggling an empty label or embedded `@`/`/` into a host reported `Okay=true`. A regression of commit `06eeb92`'s own prior fix for the same bug class. | `b0d1f04` |
+| 1 | **critical** | `ToHost` didn't re-validate `idna.ToASCII`'s output for delimiters/empty labels — Unicode fullwidth punctuation (e.g. '．','＠','／') folds to a literal ASCII delimiter post-mapping, smuggling an empty label or embedded `@`/`/` into a host reported `Okay=true`. A regression of commit `06eeb92`'s own prior fix for the same bug class. | `b0d1f04` |
 | 2 | med | 63-octet per-label DNS limit never enforced (idna's own profile deliberately leaves this to the caller). | `06dd332` |
 | 3 | low | `isPublicIP` missed 6 IANA special-purpose ranges (TEST-NET-1/2/3, benchmarking, deprecated 6to4 relay anycast, reserved Class E). | `06dd332` |
 | 4 | med | `cmd/main.go` printed an invalid (over-length) host as a "valid registrable domain" because its routing switch checked `r.TLD > 0` without `r.Okay`. | `1de29c1` |

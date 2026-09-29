@@ -103,6 +103,18 @@ stderr and `os.Exit(1)`.
 
 **Verdict: CONFIRMED** (read directly). Fixed.
 
+### Scope note: `canonRule` does not carry the new post-output re-check
+
+The fix in finding 1 applies to `ToHost`'s call into `idna.ToASCII` — the path
+that processes untrusted, attacker-controlled input. `canonRule` (used only to
+canonicalize PSL/IANA rule *labels* at list-load time) also calls
+`idna.ToASCII` directly but was deliberately left as-is: its input is the
+maintainer-configured TLD list source, not a raw untrusted URL, so it sits
+outside the threat model finding 1 addresses. Flagged here for a maintainer's
+awareness in case the trust model around PSL-source configuration ever
+changes (e.g. `Options.Source` pointed at a third-party-controlled URL) —
+not treated as part of this fix.
+
 ## Reported, not changed (documented as a known limitation)
 
 ### 6. [SECURITY/MINOR] Rectify-only mode: decimal/octal/hex-obfuscated loopback IPs pass as opaque host strings
