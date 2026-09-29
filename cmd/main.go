@@ -35,25 +35,19 @@ func main() {
 			return
 		default:
 			f, err := os.Open(os.Args[1])
-			if err == nil {
-				defer f.Close()
-				reader = f
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "sanitize:", err)
+				os.Exit(1)
 			}
+			defer f.Close()
+			reader = f
 		}
 	}
 
 	// env toggles: retain ip addresses and/or unregistered-tld hosts on stdout
 	// instead of routing them to stderr as rejects
-	var keepIP bool
-	switch os.Getenv("IP") {
-	case "on", "true", "1":
-		keepIP = true
-	}
-	var keepBadTLD bool
-	switch os.Getenv("TLD") {
-	case "on", "true", "1":
-		keepBadTLD = true
-	}
+	keepIP := envBool("IP")
+	keepBadTLD := envBool("TLD")
 
 	var host string
 	var s = sanitize.NewTLDSanitizer()
@@ -64,25 +58,44 @@ func main() {
 		if len(host) == 0 {
 			continue // blank line or host that rectified to empty
 		}
-		switch {
-		case r.IP:
-			// ip address; retained on stdout only when IP mode is on
-			if keepIP {
-				fmt.Fprintln(writer, host)
-			} else {
-				fmt.Fprintln(invalid, host)
-			}
-		case r.TLD > 0:
-			fmt.Fprintln(writer, host) // valid registrable domain
-		default:
-			// no registered tld (unknown tld or bare public suffix); retained
-			// on stdout only when TLD mode is on
-			if keepBadTLD {
-				fmt.Fprintln(writer, host)
-			} else {
-				fmt.Fprintln(invalid, host)
-			}
-		}
+		route(decide(r, keepIP, keepBadTLD), writer, invalid, host)
 	}
 
+}
+
+// decide reports whether host should be routed to stdout (true) or stderr
+// (false), given r and the keepIP/keepBadTLD toggles. A tld match alone is not
+// enough: r.TLD > 0 with r.Okay == false means the host matched a registered
+// tld but failed a later check (e.g. the 254-byte length cap or the 63-byte
+// per-label cap) — it must not be reported as a valid registrable domain.
+func decide(r sanitize.Result, keepIP, keepBadTLD bool) bool {
+	switch {
+	case r.IP:
+		return keepIP
+	case r.TLD > 0 && r.Okay:
+		return true // valid registrable domain
+	default:
+		// no registered tld (unknown tld or bare public suffix), or an
+		// otherwise-invalid host that still happened to match a tld
+		return keepBadTLD
+	}
+}
+
+// envBool reports whether the environment variable name is set to one of the
+// truthy strings this tool recognizes.
+func envBool(name string) bool {
+	switch os.Getenv(name) {
+	case "on", "true", "1":
+		return true
+	}
+	return false
+}
+
+// route writes host to w when ok, else to bad.
+func route(ok bool, w, bad *os.File, host string) {
+	if ok {
+		fmt.Fprintln(w, host)
+	} else {
+		fmt.Fprintln(bad, host)
+	}
 }

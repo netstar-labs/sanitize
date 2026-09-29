@@ -1,8 +1,8 @@
 # sanitize — Executive Summary
 
-`sanitize` is a small, self-contained Go library (zero external dependencies)
-that turns a raw, untrusted URL into a clean, validated **host** — and tells you
-what that host is. It answers
+`sanitize` is a small, self-contained Go library (one dependency: the shared,
+zero-dependency `netstar-labs/idna`) that turns a raw, untrusted URL into a
+clean, validated **host** — and tells you what that host is. It answers
 three questions in a single call: *is this usable?*, *is it an IP or a domain?*,
 and (for domains) *where is the registrable boundary?*
 
@@ -36,7 +36,7 @@ between `co.uk` and `com`) and is duplicated across services.
 | Aspect | Detail |
 | --- | --- |
 | Language | Go (module `github.com/netstar-labs/sanitize`, Go 1.24+) |
-| Dependencies | **zero external** — idna (`x/net/idna` + `x/text`) vendored under `internal/x`, pinned to Unicode 15 |
+| Dependencies | **one** — `github.com/netstar-labs/idna`, itself zero-dependency and Unicode-15-pinned |
 | Performance | ~0.04 µs per IP, **zero allocations**; ~0.2 µs per domain, 1 allocation |
 | TLD data | IANA (~1,400 entries) and/or Public Suffix (~10,000+); auto-fetched, cached 72h |
 | Footprint | single type, one method; usable as the zero value |

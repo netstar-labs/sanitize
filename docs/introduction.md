@@ -10,7 +10,8 @@ string, strips away everything that is not the host, reduces what remains to a
 single canonical form, and refuses to pass anything it cannot vouch for.
 
 Concretely, `sanitize` is a single Go type — `Sanitizer` — with a single method,
-`ToHost(url *string)`, and no external dependencies. Given a pointer to a raw
+`ToHost(url *string)`, and one dependency: the shared, zero-dependency
+`netstar-labs/idna`. Given a pointer to a raw
 URL it rewrites the string **in place** to a bare host or IP literal: it drops
 the scheme (or a protocol-relative `//`), the path, `user:pass@` credentials, and
 the port; unwraps `[ipv6]` brackets while leaving bare IPv6 literals intact;
@@ -30,16 +31,20 @@ error is ever returned; invalidity is simply `Okay == false`.
 
 The distinctive part is what happens to that canonical A-label after `sanitize`
 produces it. Because the store-then-lookup contract depends on the same input
-mapping to the same key indefinitely, `sanitize` vendors its IDNA implementation
-(`golang.org/x/net/idna` and its `golang.org/x/text` dependencies) under
-`internal/x` and **pins it to Unicode 15 outright** — deleting the lower-version
-tables and stripping the `//go:build go1.x` selectors that would otherwise let
-the Go toolchain swap the active Unicode table underneath you. Canonicalization
-then moves only when a maintainer deliberately re-vendors it, frozen against both
-dependency upgrades and compiler upgrades, so a domain canonicalized today still
-matches the record it was written to months ago. That stability is what makes the
+mapping to the same key indefinitely, `sanitize` delegates IDNA conversion to
+the shared `netstar-labs/idna` module, which vendors `golang.org/x/net/idna`
+and its `golang.org/x/text` dependencies in-tree and **pins them to Unicode 15
+outright** — deleting the lower-version tables and stripping the
+`//go:build go1.x` selectors that would otherwise let the Go toolchain swap
+the active Unicode table underneath you. Canonicalization then moves only when
+a maintainer deliberately re-vendors it, frozen against both dependency
+upgrades and compiler upgrades, so a domain canonicalized today still matches
+the record it was written to months ago — and both `sanitize` and its sibling
+`normie` resolve a given host to the same A-label, since they share this one
+pin rather than each carrying their own. That stability is what makes the
 A-label safe to use as a durable lookup key rather than merely a display
-convenience.
+convenience; `sanitize.IDNAVersion()` reports the pin so a caller can stamp it
+on every stored record (see the [User Guide](user-guide.md)).
 
 What stays in the operator's hands is the strictness of the verdict. `sanitize`
 runs in one of three modes chosen at construction — rectify-only (no network, no

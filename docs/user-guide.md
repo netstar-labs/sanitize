@@ -23,10 +23,12 @@ calling `ToHost`, and reading the result.
 go get github.com/netstar-labs/sanitize
 ```
 
-Requires Go 1.24+. The module has **no external dependencies** — the idna
-implementation (`golang.org/x/net/idna` and its `golang.org/x/text` deps) is
-vendored under [`internal/x`](../internal/x) and pinned to Unicode 15, so
-canonicalization is stable across dependency and toolchain upgrades.
+Requires Go 1.24+. The module has **one dependency**,
+[`github.com/netstar-labs/idna`](https://github.com/netstar-labs/idna) — a
+separate, shared, zero-dependency module that vendors `golang.org/x/net/idna`
+and `golang.org/x/text` in-tree and pins them to Unicode 15, so
+canonicalization is stable across dependency and toolchain upgrades, and both
+`sanitize` and its sibling `normie` resolve a given host to the same A-label.
 
 ## Quick start
 
@@ -119,8 +121,14 @@ Notes:
 - It does **not** mutate the `Options` you pass (sources are resolved into a
   private slice).
 - List files are parsed one entry per line; blank lines and `#` / `//` comments
-  are skipped, entries are lowercased, and Public Suffix wildcard (`*.`) prefixes
-  are dropped.
+  are skipped and entries are lowercased. The Public Suffix List's three rule
+  kinds are each kept in their own set rather than folded into one: a normal
+  rule (`com`) is a public suffix outright; a wildcard rule (`*.ck`) makes
+  every single label under its parent a public suffix (so `example.ck` is an
+  eTLD and `sub.example.ck`'s apex is the whole host); an exception rule
+  (`!www.ck`) carves a name back out of a wildcard and wins over it (so
+  `www.ck`'s own apex is `www.ck`, not reduced further). See
+  [Architecture](architecture.md) for the full precedence algorithm.
 - `Len()` reports how many TLD entries are loaded.
 
 ## Underscore labels (AllowUnderscore)
@@ -222,6 +230,25 @@ human-readable form worth retaining alongside the canonical host.
 
 Conversion uses non-transitional (UTS-46) processing, so deviation characters are
 preserved (`faß.de` → `xn--fa-hia.de`, not `fass.de`).
+
+### Stamping the pin (`IDNAVersion`)
+
+The canonical A-label is a **durable lookup key**: `sanitize` validates and
+canonicalizes on ingest, the result is persisted, and a later query re-derives
+the same A-label to look it up. That contract only holds while the underlying
+IDNA mapping doesn't change — but it can, via a deliberate re-vendor of the
+shared `netstar-labs/idna` module (see that repo's own drift-model docs).
+`IDNAVersion() string` reports the pinned Unicode version (currently
+`"15.0.0"`) so a caller can stamp it alongside every stored A-label/hash:
+
+```go
+version := sanitize.IDNAVersion() // "15.0.0"
+store(host, version)
+```
+
+A pin bump then shows up as a version mismatch on the next read — detectable
+skew instead of a silent, unexplained miss — rather than requiring a caller to
+notice canonicalization drifted on its own.
 
 ## What rectification does
 

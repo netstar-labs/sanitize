@@ -1,21 +1,27 @@
 # sanitize
 
 Rectify a raw, untrusted URL to a clean, validated **host** — and locate the
-registrable domain (eTLD+1) — in one allocation-light call, with **zero external
-dependencies**. It handles canonical hosts, IPv4/IPv6, and IDNA-to-punycode
-conversion; load an IANA and/or Public Suffix list and it also validates the TLD
-and reports the apex/TLD offsets.
+registrable domain (eTLD+1) — in one allocation-light call, with **one
+dependency**: the shared, zero-dependency, Unicode-15-pinned
+[`github.com/netstar-labs/idna`](https://github.com/netstar-labs/idna). It
+handles canonical hosts, IPv4/IPv6, and IDNA-to-punycode conversion; load an
+IANA and/or Public Suffix list and it also validates the TLD and reports the
+apex/TLD offsets.
 
 ```
 raw url ──▶ ToHost(&url)  (rewrites *url in place)
               │
               ├─ prep: strip scheme·//·path·user:pass@·:port ; unwrap [ipv6]
+              │        (+ backslash-as-slash, C0/whitespace strip, percent-decode
+              │           + reject forbidden bytes, reject empty labels)
               │
               ├─ netip.ParseAddr ──▶ IP literal ──▶ classify routable? ──▶ Result{IP, Okay, Port}
-              │                                     (reject private/loopback/unspecified)
+              │                                     (reject private/loopback/unspecified
+              │                                      + link-local/multicast/CGNAT/reserved)
               │
               └─ host ──▶ lowercase · trim "." ──▶ idna.ToASCII (punycode A-label)
-                            │                       (Display = U-label if converted)
+                            │                       (Display = U-label if converted;
+                            │                        output re-checked for delimiters/empty labels)
                             │
                             ├─ tld list loaded ──▶ PSL algorithm (exception ▸ longest wildcard/normal)
                             │                       ──▶ locate eTLD + apex; keep "www." when it is the apex label
@@ -67,13 +73,15 @@ Root Go files (the library is a single file; front-ends live under `cmd/` and
 | --- | --- |
 | [`sanitize.go`](sanitize.go) | The entire library: the `Sanitizer`, `Result`, and `Options` types; the constructors; `prep` (in-place URL→host rectifier); `fetch` (atomic TLD-list download); `Configure` (list loading + 72h cache); and `ToHost` (the sole entry point). |
 | [`sanitize_test.go`](sanitize_test.go) | Print demos (`TestSanitize`, `TestTLDSanitize`) plus the assertion tests: rectification edge cases, non-transitional IDNA pinning (`faß.de → xn--fa-hia.de`), the `AllowUnderscore` STD3 contract, and the `Display` U-label behavior. |
+| [`rectify_test.go`](rectify_test.go) | The security/edge-case regression suite (findings F1-F11): backslash authority-confusion, empty labels (incl. via post-IDNA-mapping Unicode punctuation), last-`@` userinfo, whitespace/percent-decoding, overlong labels, IP classification specials, and ICANN-vs-private PSL scoping. |
+| [`psl_internal_test.go`](psl_internal_test.go) | White-box tests of `suffix()`'s rule precedence (exception beats wildcard, longest match wins among normal/wildcard). |
 
 Supporting directories: [`cmd/`](cmd) (stdin/stdout filter), [`build/`](build)
-(version-stamped cross-compile/deploy for `cmd/`), [`example/`](example)
-(library/HTTP/Unix-socket/MCP front-ends), [`internal/idna`](internal/idna)
-(owned idna policy seam), and [`internal/x`](internal/x) (vendored
-`x/net/idna` + `x/text`, pinned to Unicode 15). Runtime TLD lists cache under
-`./.sanitize` (or `/var/sanitize` on Linux).
+(version-stamped cross-compile/deploy for `cmd/`), and [`example/`](example)
+(library/HTTP/Unix-socket/MCP front-ends). The one dependency,
+`github.com/netstar-labs/idna`, is a separate, shared module (not vendored
+in-tree here — see its own repo). Runtime TLD lists cache under `./.sanitize`
+(or `/var/sanitize` on Linux).
 
 ## License
 
