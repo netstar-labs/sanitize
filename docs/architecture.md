@@ -107,7 +107,7 @@ on the same host's A-label). `sanitize` calls its four exported functions:
 func ToASCII(host string, allowUnderscore bool) (ascii string, ok bool)
 func ToASCIIErr(host string) (string, error)
 func ToUnicode(host string, allowUnderscore bool) (unicode string, ok bool)
-func Unicode() string // the pinned Unicode version, e.g. "15.0.0"
+func Unicode() string // the pinned Unicode version, e.g. "17.0.0"
 ```
 
 `sanitize` uses `ToASCII` (via `ToHost`) and `Unicode` (via `IDNAVersion`,
@@ -126,7 +126,7 @@ not `fass.de`).
 
 The `netstar-labs/idna` module vendors `golang.org/x/net/idna` and its
 `golang.org/x/text` dependencies in its own tree, pruned and build-tag-stripped
-to **Unicode 15**, so canonicalization is frozen against both dependency
+to **Unicode 17**, so canonicalization is frozen against both dependency
 upgrades and the Go toolchain's Unicode version — the A-label a given input
 produces will not move except by a deliberate re-vendor there.
 

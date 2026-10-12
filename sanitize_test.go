@@ -319,3 +319,28 @@ func TestDisplay(t *testing.T) {
 		}
 	}
 }
+
+// TestIDNAUnicode17 pins what the idna v0.2.0 (Unicode 17.0.0) re-vendor changes at this layer:
+// U+1E9E re-keys to the sharp-s A-label, invisible format characters are ignored, and a host
+// made only of them is still rejected, by the empty-label re-check of idna's output.
+func TestIDNAUnicode17(t *testing.T) {
+	if v := sanitize.IDNAVersion(); v != "17.0.0" {
+		t.Fatalf("IDNAVersion() = %q, want 17.0.0", v)
+	}
+	s := sanitize.NewSanitizer()
+	for _, tc := range []struct {
+		in, want string
+		okay     bool
+	}{
+		{"straẞe.de", "xn--strae-oqa.de", true},
+		{"exam⁡ple.com", "example.com", true},
+		{"⁡.com", "", false},
+		{"ㅤ⁡.com", "", false},
+	} {
+		url := tc.in
+		r := s.ToHost(&url)
+		if r.Okay != tc.okay || (tc.okay && url != tc.want) {
+			t.Errorf("ToHost(%q) = %q okay=%v, want %q okay=%v", tc.in, url, r.Okay, tc.want, tc.okay)
+		}
+	}
+}
