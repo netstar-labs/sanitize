@@ -33,7 +33,7 @@ The distinctive part is what happens to that canonical A-label after `sanitize`
 produces it. Because the store-then-lookup contract depends on the same input
 mapping to the same key indefinitely, `sanitize` delegates IDNA conversion to
 the shared `netstar-labs/idna` module, which vendors `golang.org/x/net/idna`
-and its `golang.org/x/text` dependencies in-tree and **pins them to Unicode 15
+and its `golang.org/x/text` dependencies in-tree and **pins them to Unicode 17
 outright** — deleting the lower-version tables and stripping the
 `//go:build go1.x` selectors that would otherwise let the Go toolchain swap
 the active Unicode table underneath you. Canonicalization then moves only when

@@ -26,7 +26,7 @@ go get github.com/netstar-labs/sanitize
 Requires Go 1.24+. The module has **one dependency**,
 [`github.com/netstar-labs/idna`](https://github.com/netstar-labs/idna) — a
 separate, shared, zero-dependency module that vendors `golang.org/x/net/idna`
-and `golang.org/x/text` in-tree and pins them to Unicode 15, so
+and `golang.org/x/text` in-tree and pins them to Unicode 17, so
 canonicalization is stable across dependency and toolchain upgrades, and both
 `sanitize` and its sibling `normie` resolve a given host to the same A-label.
 
@@ -239,12 +239,19 @@ the same A-label to look it up. That contract only holds while the underlying
 IDNA mapping doesn't change — but it can, via a deliberate re-vendor of the
 shared `netstar-labs/idna` module (see that repo's own drift-model docs).
 `IDNAVersion() string` reports the pinned Unicode version (currently
-`"15.0.0"`) so a caller can stamp it alongside every stored A-label/hash:
+`"17.0.0"`) so a caller can stamp it alongside every stored A-label/hash:
 
 ```go
-version := sanitize.IDNAVersion() // "15.0.0"
+version := sanitize.IDNAVersion() // "17.0.0"
 store(host, version)
 ```
+
+The move from `"15.0.0"` to `"17.0.0"` (idna v0.2.0) re-keys exactly one character:
+U+1E9E (capital sharp s) now maps to `ß`, not `ss`. Stored keys whose source contains it
+must be recomputed. Invisible format characters (U+2061, U+3164 and similar) are now
+ignored rather than rejected, so `exam\u2061ple.com` canonicalizes to `example.com`. A
+host made only of them is still rejected here, by the empty-label re-check. See
+`TestIDNAUnicode17` and the idna repository's re-vendor log.
 
 A pin bump then shows up as a version mismatch on the next read — detectable
 skew instead of a silent, unexplained miss — rather than requiring a caller to
