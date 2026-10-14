@@ -139,8 +139,8 @@ the pin onto stored records.
 
 `sanitize` does not trust `ToASCII`'s output blindly, either: UTS-46 mapping
 can fold Unicode punctuation (fullwidth/halfwidth forms) down to a literal
-ASCII delimiter or produce an empty label, so `ToHost` re-checks the output
-for both before accepting it (see [Request flow](#request-flow-tohost)) —
+ASCII delimiter or dot, so `ToHost` collapses any resulting empty label and
+re-checks the output for a forbidden host byte before accepting it (see [Request flow](#request-flow-tohost)) —
 mirroring the equivalent re-check in the WHATWG URL spec's own domain-parsing
 algorithm.
 
@@ -153,8 +153,11 @@ algorithm.
 2. If `isIP`, returns immediately — `Okay` is the IP's public-routability.
 3. **Converts IDNA:** captures the pre-conversion string, calls
    `idna.ToASCII(*url, s.allowUnderscore)`. On success it re-checks the
-   *output* for an empty label or a WHATWG forbidden host byte (UTS-46 mapping
-   can fold Unicode punctuation to one) and fails validation if either fires.
+   *output*: an empty label (UTS-46 can fold `。` or `．` to `.`) is collapsed as
+   in `prep`, and a WHATWG forbidden host byte (UTS-46 can fold fullwidth
+   punctuation to one) fails validation. It then probes the mapped host for an
+   inet_aton IPv4 — `１２７.０.０.１` is `127.0.0.1` to a browser — and, on a
+   match, returns it as an IP exactly as `prep` would have.
    On success it sets `*url` to the A-label and, if that differs from the
    input, records the unicode form in `Result.Display`. On any failure `*url`
    is **blanked** (`""`) so it fails downstream validation.
@@ -193,19 +196,36 @@ string re-slicing (no allocation):
    rewritten to `/` (closes the `http://evil.com\@good.com/` authority-
    confusion bypass for the special schemes this tool targets — backslash
    ends the authority, so the host is `evil.com`, not `good.com`).
-2. **Scheme** — a leading `//` (protocol-relative) is dropped; otherwise any
-   `scheme://` prefix is dropped, case-insensitively, guarded by requiring the
-   string's first `/` to be the one inside `://` (so a `://` embedded in a path
-   or query is never mistaken for a scheme).
-3. **Path** — cut at the first `/` (`IndexByte`).
-4. **Credentials** — cut everything up to and including the **last** `@`
+2. **Scheme** — only a scheme at the very start of the string counts (RFC 3986
+   grammar, `schemeEnd`), so a `://` inside a query or fragment
+   (`example.com?x=http://evil.com`) is content, never a scheme. Any scheme
+   followed by `//` is dropped, case-insensitively; the special schemes (`http`,
+   `https`, `ws`, `wss`, `ftp`) are also dropped with one slash, none, or many
+   (`http:/h`, `http:h`, `http:///h`), as a browser does. A leading `//`
+   (protocol-relative) is dropped. `file:` keeps its empty host, so its first
+   path segment is never promoted to a host. Only the special schemes and
+   `file:` are navigable web URLs, so any **other** scheme with `//`
+   (`javascript://example.com/...`, `ssh://example.com`) yields no host, and an
+   **opaque** scheme with no authority (`mailto:a@example.com`,
+   `javascript:alert(1)`, `data:...`, `tel:...`) is rejected up front
+   (`opaqueScheme`) — a host is not attributed to either. This matches normie.
+   Three shapes only look like `scheme:rest` and are not opaque: `host.tld:port`
+   or `host:junk` (a `.` in the candidate, or digits after the colon), a bare IPv6
+   literal, and `file:`. Schemeless `user:pass@host` **is** opaque (as in normie),
+   because it cannot be told from `data:a@b@host:80`.
+3. **Authority end** — cut at the first `/`, `?` or `#` (`IndexAny`). `?` and
+   `#` belong in this set: without them `http://example.com#@evil.com` has its
+   fragment read as userinfo and reports host `evil.com`, while the browser
+   navigates to `example.com`.
+4. **Credentials** — within the authority, cut everything up to and including the **last** `@`
    (WHATWG: userinfo ends at the last `@`, so `a@b@c.com` is host `c.com`, not
    `b@c.com`).
 5. **Port / IPv6 brackets** — only if a `:` is present:
    - `[...]:port` → inside the brackets (`Index("]:")`).
    - `[...]` → strip the brackets (`TrimSuffix "]"`).
    - **more than one `:`** (`LastIndexByte != IndexByte`) → a bare IPv6 literal;
-     leave intact. This is what distinguishes `::ffff:1.2.3.4` from a ported
+     leave as written for now (the IP probe below canonicalizes it). This is what
+     distinguishes `::ffff:1.2.3.4` from a ported
      `host:port` and prevents mangling IPv4-mapped IPv6.
    - otherwise (single `:`) → cut at the colon (`host:port` / `ipv4:port`).
 
@@ -213,20 +233,34 @@ string re-slicing (no allocation):
    `port`; invalid text (non-numeric, empty, out of range) is still stripped
    but reports 0, preserving the historical lenient behavior. Capture happens
    here — before the IP probe — so ported IP forms report their port too.
-6. **IP probe** — `netip.ParseAddr`. On success, return
+6. **IP probe** — `netip.ParseAddr`. On success the address is **canonicalized**
+   to one key per address: lowercase, compressed, zone dropped (host-local), and
+   an IPv4-mapped IPv6 spelling (`::ffff:8.8.8.8`, `::ffff:808:808`) reduced to
+   the IPv4 it is, so listing `8.8.8.8` also matches `[::ffff:8.8.8.8]`. Then return
    `isIP=true, ok=isPublicIP(ip)` with the captured `port` (see
    [IP classification](#ip-classification)).
 7. **Host form** — `ToLower`; trim **all** trailing dots (root labels), not
    just one; percent-decode (`percentDecodeHost`, rejecting a malformed escape
    or one that decodes to a WHATWG forbidden host byte — a browser decodes the
    host before IDNA, so this must too, or a percent-encoded delimiter would
-   smuggle a different host past extraction); then reject an empty label
-   (`hasEmptyLabel` — a leading dot, or `".."` anywhere). Returns `ok=false`;
+   smuggle a different host past extraction); then **collapse** empty labels
+   (`collapseDots` — leading dots dropped, runs folded to one, as the GSB
+   canonicalization does: `"..a...b."` is `a.b`). An empty label used to be
+   rejected, which meant such a host was never checked; collapsing yields the
+   key a lookup would use. Returns `ok=false`;
    the caller runs idna conversion and validation. The leading-`www.` strip is
    *not* done here — `ToHost` does it PSL-aware, after idna (see
    [Request flow](#request-flow-tohost)), so `www.<eTLD>` forms are not
    prematurely reduced to a bare public suffix by a normalizer that has no PSL
    list to check against.
+   After the percent-decode the host is also probed as an **inet_aton** IPv4
+   (`parseIPv4Radix`, mirroring `normie.ParseIPv4`): `2130706433`,
+   `0x7f.0.0.1`, `010.8.8.8` and `127.1` are the same address to a browser as
+   the dotted quad, and `netip.ParseAddr` accepts only strict dotted decimal, so
+   without this they fall through as hostnames and are never judged as
+   addresses. A match is rewritten to its dotted quad and returned as an IP.
+   `0.0.0.0/8` is non-public, so a bare number such as `123` (`0.0.0.123`)
+   reports an IP that is not `Okay`.
 
 ## IP classification
 

@@ -11,9 +11,10 @@ apex/TLD offsets.
 ```
 raw url ──▶ ToHost(&url)  (rewrites *url in place)
               │
-              ├─ prep: strip scheme·//·path·user:pass@·:port ; unwrap [ipv6]
-              │        (+ backslash-as-slash, C0/whitespace strip, percent-decode
-              │           + reject forbidden bytes, reject empty labels)
+              ├─ prep: strip scheme·//·path/?/#·user:pass@·:port ; unwrap [ipv6]
+              │        (+ backslash-as-slash, C0/whitespace strip, inet_aton IPv4, percent-decode
+              │           + reject forbidden bytes, collapse empty labels,
+              │           reject non-web/opaque schemes, canonicalize IPv6)
               │
               ├─ netip.ParseAddr ──▶ IP literal ──▶ classify routable? ──▶ Result{IP, Okay, Port}
               │                                     (reject private/loopback/unspecified
@@ -21,7 +22,7 @@ raw url ──▶ ToHost(&url)  (rewrites *url in place)
               │
               └─ host ──▶ lowercase · trim "." ──▶ idna.ToASCII (punycode A-label)
                             │                       (Display = U-label if converted;
-                            │                        output re-checked for delimiters/empty labels)
+                            │                        output re-checked for delimiters; dots collapsed; mapped IPv4 re-probed)
                             │
                             ├─ tld list loaded ──▶ PSL algorithm (exception ▸ longest wildcard/normal)
                             │                       ──▶ locate eTLD + apex; keep "www." when it is the apex label
