@@ -261,17 +261,26 @@ notice canonicalization drifted on its own.
 
 Given a raw value, `ToHost` performs, in order:
 
-1. Strip the scheme — any scheme (`http://`, `HTTPS://`, `ftp://`, …),
-   case-insensitively — or a protocol-relative `//` prefix (`//example.com/x`).
-2. Strip everything from the first `/` (path/query/fragment).
-3. Strip `user:pass@` credentials.
+1. Strip the scheme — any scheme followed by `//` (`http://`, `HTTPS://`,
+   `ftp://`, …), case-insensitively; `http:/h`, `http:h` and `http:///h` too —
+   or a protocol-relative `//` prefix (`//example.com/x`). Only a scheme at the
+   very start counts: `example.com?x=http://evil.com` is host `example.com`.
+   Only web schemes (`http`, `https`, `ws`, `wss`, `ftp`, `file`) yield a host:
+   `javascript://example.com/`, `ssh://example.com` and opaque `mailto:a@b.com`,
+   `javascript:alert(1)`, `data:…` are rejected.
+2. Strip everything from the first `/`, `?` or `#` (path/query/fragment), so
+   `http://example.com#@evil.com` is host `example.com`.
+3. Strip `user:pass@` credentials (up to the last `@`).
 4. Remove the port — recording it in `Result.Port` — and unwrap IPv6 brackets:
    - `example.com:8443` → `example.com` (`Port == 8443`)
    - `[2001:db8::1]:443` → `2001:db8::1` (`Port == 443`)
    - `[2001:db8::1]` → `2001:db8::1`
-   - bare IPv6 literals (`abcd::dcba`, `::ffff:1.2.3.4`) are kept intact.
+   - bare IPv6 literals (`abcd::dcba`) are kept whole; every IPv6 spelling is
+     then canonicalized (lowercase, compressed, zone dropped), and an
+     IPv4-mapped one (`::ffff:1.2.3.4`) is returned as the IPv4 `1.2.3.4`.
 5. If it parses as an IP, classify and stop.
-6. Otherwise: lowercase, trim a trailing canonical dot, strip a leading `www.`,
+6. Otherwise: lowercase, trim trailing dots, collapse leading and repeated dots
+   (`.a..b.com` → `a.b.com`), strip a leading `www.`,
    then convert IDNA to punycode (`exämple.com` → `xn--exmple-cua.com`, with the
    unicode form returned in `Display`). A conversion error — malformed punycode
    like `xn--a.com`, or an underscore label unless [`AllowUnderscore`](#underscore-labels-allowunderscore)

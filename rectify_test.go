@@ -29,9 +29,11 @@ func TestRectifyEdgeCases(t *testing.T) {
 		{"F1b", `http://good.com\@evil.com/`, "good.com", true},
 		{"F1c", `http://example.com\path`, "example.com", true},
 		{"F1d", `https:\\example.com`, "example.com", true},
-		// F2 — empty labels are not valid hosts.
-		{"F2a", "http://example..com/", "", false},
-		{"F2b", "http://.example.com/", "", false},
+		// F2 — empty labels were once rejected; they are now collapsed (".x" is x,
+		// "x..y" is x.y) as the GSB canonicalization and normie do, so the host is
+		// still checked instead of silently skipped. See TestCollapseDots.
+		{"F2a", "http://example..com/", "example.com", true},
+		{"F2b", "http://.example.com/", "example.com", true},
 		// F4 — userinfo ends at the LAST '@'.
 		{"F4a", "http://a@b.com@c.com/", "c.com", true},
 		{"F4b", "http://a@b@c.com/", "c.com", true},
@@ -62,9 +64,11 @@ func TestRectifyEdgeCases(t *testing.T) {
 // regression of the F2 fix (06eeb92), which closed the identical hole for
 // literal and percent-encoded input but not for Unicode mapping.
 func TestRectifyPostIDNAMappingEdgeCases(t *testing.T) {
-	// F9a — fullwidth dot; default (strict) profile, no special config needed.
-	if host, okay, _ := rectify("a．．b.com"); okay {
-		t.Errorf("F9a: ToHost(fullwidth dots) = host=%q okay=true, want okay=false (empty label smuggled through)", host)
+	// F9a — fullwidth dots are mapped to "." by UTS-46 AFTER prep's own checks; the
+	// mapped empty label is collapsed like a literal one ("a..b.com" -> "a.b.com"),
+	// not left in the host. (This once asserted rejection; see F2.)
+	if host, okay, _ := rectify("a．．b.com"); !okay || host != "a.b.com" {
+		t.Errorf("F9a: ToHost(fullwidth dots) = host=%q okay=%v, want a.b.com true (mapped empty label collapsed)", host, okay)
 	}
 
 	// F9b/c — fullwidth '@'/'/' ; require AllowUnderscore(true) (the loose

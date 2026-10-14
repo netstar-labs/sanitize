@@ -146,9 +146,9 @@ func TestSanitizeCases(t *testing.T) {
 		{"127.0.0.1", "127.0.0.1", false, true, false},          // loopback
 		{"0.0.0.0", "0.0.0.0", false, true, false},              // unspecified
 		{"https://[abcd::dbca]:1234", "abcd::dbca", true, true, false},
-		{"[2001:db8::1]", "2001:db8::1", true, true, false},     // unported bracket unwrap
-		{"::ffff:1.2.3.4", "::ffff:1.2.3.4", true, true, false}, // bare ipv4-mapped ipv6
-		{"[::ffff:1.2.3.4]:80", "::ffff:1.2.3.4", true, true, false},
+		{"[2001:db8::1]", "2001:db8::1", true, true, false}, // unported bracket unwrap
+		{"::ffff:1.2.3.4", "1.2.3.4", true, true, false},    // bare ipv4-mapped ipv6: reduced to the IPv4 it is
+		{"[::ffff:1.2.3.4]:80", "1.2.3.4", true, true, false},
 		{"xn--a.com", "", false, false, false}, // malformed punycode -> rejected
 	} {
 		v := tc.in

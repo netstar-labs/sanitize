@@ -134,20 +134,16 @@ func prep(url *string) (isIP, ok bool, port int) {
 	*url = stripURLWhitespace(*url)
 	*url = strings.ReplaceAll(*url, "\\", "/")
 
-	// basic url assurances
-	if strings.HasPrefix(*url, "//") { // strip protocol-relative prefix //example.com
-		*url = (*url)[2:]
-	} else if idx := strings.Index(*url, "://"); idx >= 0 && strings.IndexByte(*url, '/') == idx+1 {
-		// the first '/' belongs to "://" so this is a scheme (any scheme, any
-		// case), not a "://" embedded later in the path or query
-		*url = (*url)[idx+3:] // strip scheme
+	// A scheme with no authority (mailto:, javascript:, data:) is not a navigable
+	// URL; reject it rather than attribute a host to it.
+	if opaqueScheme(*url) {
+		*url = ""
+		return false, false, 0
 	}
-	if idx := strings.IndexByte(*url, '/'); idx >= 0 {
-		*url = (*url)[:idx] // strip page
-	}
-	if idx := strings.LastIndexByte(*url, '@'); idx >= 0 {
-		*url = (*url)[idx+1:] // strip user:pass — userinfo ends at the LAST '@' (WHATWG)
-	}
+
+	// Reduce to the bare authority: scheme, slashes, path/query/fragment and
+	// userinfo are all dropped (see authority).
+	*url = authority(*url)
 
 	// port removal / ipv6 bracket unwrap. Invalid port text (non-numeric, out of
 	// range) is deliberately stripped and reported as 0 rather than rejecting the
@@ -172,6 +168,13 @@ func prep(url *string) (isIP, ok bool, port int) {
 
 	// detect ipv4/6 and validate
 	if ip, err := netip.ParseAddr(*url); err == nil {
+		// One key per address: lowercase, compressed, zone dropped (host-local), and
+		// an IPv4-mapped IPv6 spelling reduced to the IPv4 it is, so listing
+		// 8.8.8.8 also matches [::ffff:8.8.8.8].
+		ip = ip.WithZone("").Unmap()
+		if strings.IndexByte(*url, ':') >= 0 {
+			*url = ip.String() // a strict dotted quad is already canonical; skip the alloc
+		}
 		return true, isPublicIP(ip), port
 	}
 
@@ -183,8 +186,12 @@ func prep(url *string) (isIP, ok bool, port int) {
 	} else {
 		*url = "" // decoded to a forbidden host code point / malformed escape -> reject
 	}
-	if hasEmptyLabel(*url) {
-		*url = "" // empty label (".x", "x..y") is not a valid host
+	*url = collapseDots(*url) // GSB/WHATWG-lenient: ".x", "x..y" are x, x.y (not rejected)
+	if addr, aok := parseIPv4Radix(*url); aok {
+		// inet_aton forms (2130706433, 0x7f.0.0.1, 127.1) are the same address to a
+		// browser as the dotted quad, so judge and report them as one.
+		*url = addr.String()
+		return true, isPublicIP(addr), port
 	}
 	return false, false, port
 }
@@ -197,6 +204,111 @@ func portNumber(s string) int {
 		return 0
 	}
 	return int(n)
+}
+
+// authority reduces s (already whitespace-stripped, backslashes folded to '/') to
+// its authority component, using the WHATWG rules a browser navigates by:
+//
+//   - A scheme counts only at the very start of s (RFC 3986 grammar), so a "://"
+//     inside a query or fragment ("example.com?x=http://evil.com") is content,
+//     not a scheme. Any scheme followed by "//" is stripped; the special schemes
+//     (http, https, ws, wss, ftp) are also stripped with one slash, none, or
+//     many ("http:/h", "http:h", "http:///h"). file: keeps its empty host so its
+//     first path segment is never promoted to a host.
+//   - The authority ends at the first '/', '?' or '#'. Omitting '?' and '#'
+//     turns "http://example.com#@evil.com" into host evil.com while the browser
+//     navigates to example.com.
+//   - Userinfo ends at the LAST '@' inside the authority.
+//
+// Only the special schemes and file: are navigable web URLs. Any other scheme with
+// a "//" (javascript://example.com/..., ssh://example.com) yields no authority at
+// all, so no host is attributed to it; opaque schemes are rejected by opaqueScheme.
+func authority(s string) string {
+	if i := schemeEnd(s); i > 0 {
+		switch rest := s[i+1:]; {
+		case isSpecialScheme(s[:i]):
+			s = strings.TrimLeft(rest, "/")
+		case strings.HasPrefix(rest, "//"):
+			if !strings.EqualFold(s[:i], "file") {
+				return ""
+			}
+			s = rest[2:]
+		}
+	} else if strings.HasPrefix(s, "//") { // protocol-relative //example.com
+		s = strings.TrimLeft(s, "/")
+	}
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndexByte(s, '@'); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
+}
+
+// opaqueScheme reports whether s begins with a non-special scheme that has no
+// authority: "mailto:a@b.com", "javascript:alert(1)", "data:text/html,...",
+// "tel:+1555". Two shapes only look like "scheme:rest" and are NOT opaque: a
+// "host.tld:port" or "host:junk" (a '.' in the candidate, or digits after the
+// colon) and a bare IPv6 literal (several ':' and no '@'). A second ':' alongside
+// an '@' is NOT an exemption: "data:a@b@example.com:80" is not a visit to
+// example.com, and schemeless "user:pass@host" is opaque, as in normie.
+func opaqueScheme(s string) bool {
+	i := schemeEnd(s)
+	if i <= 0 {
+		return false
+	}
+	scheme, rest := s[:i], s[i+1:]
+	if strings.IndexByte(scheme, '.') >= 0 || isSpecialScheme(scheme) || strings.EqualFold(scheme, "file") ||
+		strings.HasPrefix(rest, "//") || portFollows(rest) {
+		return false
+	}
+	end := strings.IndexAny(s, "/?#")
+	if end < 0 {
+		end = len(s)
+	}
+	auth := s[:end]
+	return strings.Count(auth, ":") == 1 || strings.IndexByte(auth, '@') >= 0
+}
+
+// portFollows reports whether s begins with digits ended by a delimiter or the
+// end of s, i.e. the preceding ':' separated a port, not a scheme.
+func portFollows(s string) bool {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	return i > 0 && (i == len(s) || strings.IndexByte("/?#", s[i]) >= 0)
+}
+
+// schemeEnd returns the index of the ':' ending a leading RFC 3986 scheme
+// (ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )), or -1 when s does not start with one.
+func schemeEnd(s string) int {
+	if s == "" || !isAlpha(s[0]) {
+		return -1
+	}
+	for i := 1; i < len(s); i++ {
+		switch c := s[i]; {
+		case isAlpha(c), c >= '0' && c <= '9', c == '+', c == '-', c == '.':
+		case c == ':':
+			return i
+		default:
+			return -1
+		}
+	}
+	return -1
+}
+
+func isAlpha(c byte) bool { return c|0x20 >= 'a' && c|0x20 <= 'z' }
+
+// isSpecialScheme reports whether s is a WHATWG special scheme that always has an
+// authority, other than file (whose host is usually empty).
+func isSpecialScheme(s string) bool {
+	switch strings.ToLower(s) {
+	case "http", "https", "ws", "wss", "ftp":
+		return true
+	}
+	return false
 }
 
 // stripURLWhitespace removes every tab/LF/CR (WHATWG strips these anywhere in a
@@ -212,7 +324,7 @@ func stripURLWhitespace(s string) string {
 }
 
 // isPublicIP reports whether ip is a usable, publicly-routable unicast address.
-// It excludes unspecified, loopback, private (RFC1918 / ULA), link-local unicast
+// It excludes unspecified, "this network" (0.0.0.0/8), loopback, private (RFC1918 / ULA), link-local unicast
 // and multicast (incl. cloud-metadata 169.254.0.0/16 and fe80::/10), all
 // multicast, CGNAT (100.64.0.0/10), the remaining IANA special-purpose v4
 // ranges (documentation TEST-NET-1/2/3, benchmarking 198.18.0.0/15, the
@@ -230,6 +342,9 @@ func isPublicIP(ip netip.Addr) bool {
 	}
 	if ip.Is4() {
 		b := ip.As4()
+		if b[0] == 0 { // "this network" 0.0.0.0/8 (RFC 1122): never a destination
+			return false
+		}
 		if b[0] == 100 && b[1] >= 64 && b[1] <= 127 { // CGNAT 100.64.0.0/10
 			return false
 		}
@@ -255,11 +370,22 @@ func isPublicIP(ip netip.Addr) bool {
 	return true
 }
 
-// hasEmptyLabel reports whether host has a zero-length DNS label — an empty host,
-// a leading dot, or an interior "..". (A trailing dot is trimmed before this.)
-// UTS-46 lookup mapping does not reject these, so guard them here.
-func hasEmptyLabel(host string) bool {
-	return host == "" || host[0] == '.' || strings.Contains(host, "..")
+// collapseDots drops leading and trailing dots and folds each run of dots to
+// one, as the GSB canonicalization does: "..a...b." is "a.b". An empty label is
+// not a distinct host a browser would resolve differently, so rejecting it would
+// only mean the host is never checked. Returns s itself when nothing changes.
+func collapseDots(s string) string {
+	if !strings.Contains(s, "..") && !strings.HasPrefix(s, ".") && !strings.HasSuffix(s, ".") {
+		return s
+	}
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' && (len(b) == 0 || b[len(b)-1] == '.') {
+			continue
+		}
+		b = append(b, s[i])
+	}
+	return strings.TrimRight(string(b), ".")
 }
 
 // forbiddenHostByte reports whether b is a WHATWG forbidden host code point — a
@@ -502,15 +628,29 @@ func (s *Sanitizer) ToHost(url *string) (result Result) {
 	// (U-label) form so it can be exposed when a conversion actually occurred.
 	display := *url
 	ascii, ok := idna.ToASCII(*url, s.allowUnderscore)
-	if ok && (hasEmptyLabel(ascii) || hasForbiddenHostByte(ascii)) {
+	if ok {
 		// idna's UTS-46 mapping can fold Unicode punctuation to a literal ASCII
-		// delimiter or produce an empty label; re-check its OUTPUT the same way
-		// prep already checked the raw input, so a folded "." or "@"/"/" can't
-		// sail through disguised as a validated host.
-		ok = false
+		// "." (collapse it as prep does) or delimiter; re-check its OUTPUT the same
+		// way prep already checked the raw input, so a folded "@"/"/" can't sail
+		// through disguised as a validated host.
+		ascii = collapseDots(ascii)
+		if ascii == "" || hasForbiddenHostByte(ascii) {
+			ok = false
+		}
 	}
 	if !ok {
 		*url = "" // unconvertible idna label; fails validation below
+	}
+
+	// UTS-46 mapping can turn a non-address into one ("１２７.０.０.１", "0x7f。0。0。1"),
+	// and a browser maps before it parses an address, so probe again on the mapped
+	// host or a loopback literal is reported as an ordinary hostname.
+	if ok {
+		if addr, aok := parseIPv4Radix(ascii); aok {
+			*url = addr.String()
+			result.IP, result.Okay = true, isPublicIP(addr)
+			return
+		}
 	}
 
 	// Strip a leading "www." label, PSL-aware: keep it when www is itself the apex
